@@ -5,3 +5,5 @@ __pycache__/
 .env
 logs/
 data/processed/
+app/db/*.db
+app/db/*.sqlite*
