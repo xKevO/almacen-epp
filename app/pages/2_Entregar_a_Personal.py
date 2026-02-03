@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 import pandas as pd
 import streamlit as st
 from db.connection import get_engine
@@ -236,11 +238,12 @@ if pending:
       AND item_id=:iid
       AND qty=:neg_qty
       AND ((:size IS NULL AND size IS NULL) OR (:size IS NOT NULL AND size=:size))
-      AND txn_datetime >= datetime('now','-10 seconds')
+      AND txn_datetime >= datetime(:now_utc,'-10 seconds')
     ORDER BY transaction_id DESC
     LIMIT 1;
     """
 
+    now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     with engine.connect() as conn:
         dup = conn.execute(
             text(dup_q),
@@ -250,6 +253,7 @@ if pending:
                 "iid": pending["item_id"],
                 "neg_qty": -pending["qty"],
                 "size": pending["size"],
+                "now_utc": now_utc,
             },
         ).fetchone()
 
@@ -291,7 +295,7 @@ if pending:
                         item_id, qty, size, employee_id,
                         request_number, reference, notes, created_by
                     ) VALUES (
-                        datetime('now'),'OUT',:pid,:lid,
+                        :now_utc,'OUT',:pid,:lid,
                         :iid,:qty,:size,:eid,
                         NULL,NULL,:notes,'kevin'
                     )
@@ -309,6 +313,9 @@ if pending:
                             f" | {pending['observacion']}"
                             if pending["observacion"]
                             else ""
+                        ),
+                        "now_utc": datetime.now(timezone.utc).strftime(
+                            "%Y-%m-%d %H:%M:%S"
                         ),
                     },
                 )

@@ -1,4 +1,6 @@
 import io
+from datetime import datetime, time, timezone
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
@@ -8,7 +10,14 @@ from sqlalchemy import text
 st.set_page_config(page_title="Kardex", layout="wide")
 st.title("📒 Kardex / Historial de movimientos")
 
+
 engine = get_engine()
+
+# Estrategia definitiva de fechas/horas:
+# - Guardar en BD en UTC (txn_datetime en UTC)
+# - Mostrar y filtrar en hora local (America/Lima), convirtiendo a UTC al consultar
+LOCAL_TZ = ZoneInfo("America/Lima")
+UTC_TZ = timezone.utc
 
 
 # -------------------------
@@ -139,6 +148,24 @@ def query_transactions(filters: dict) -> pd.DataFrame:
         }
         df["tipo"] = df["tipo_code"].map(tipo_map).fillna(df["tipo_code"])
 
+        # Mostrar fecha/hora en zona local (America/Lima).
+        # En BD se asume UTC; si viene naive, la tratamos como UTC.
+        if "fecha_hora" in df.columns and not df.empty:
+            fh = pd.to_datetime(df["fecha_hora"], errors="coerce")
+            try:
+                fh = fh.dt.tz_localize(
+                    "UTC", nonexistent="shift_forward", ambiguous="NaT"
+                )
+            except Exception:
+                # Si ya tiene tz o falla localize, intentamos convertir directamente
+                pass
+            try:
+                fh = fh.dt.tz_convert(LOCAL_TZ)
+            except Exception:
+                # Si quedó naive por algún motivo, lo dejamos como está
+                pass
+            df["fecha_hora"] = fh.dt.strftime("%Y-%m-%d %H:%M:%S")
+
     return df
 
 
@@ -174,6 +201,19 @@ def query_kardex_item(
 
     with engine.connect() as conn:
         df = pd.read_sql(text(q), conn, params=params)
+
+    # Mostrar fecha/hora en zona local (America/Lima). En BD se asume UTC.
+    if "fecha_hora" in df.columns and not df.empty:
+        fh = pd.to_datetime(df["fecha_hora"], errors="coerce")
+        try:
+            fh = fh.dt.tz_localize("UTC", nonexistent="shift_forward", ambiguous="NaT")
+        except Exception:
+            pass
+        try:
+            fh = fh.dt.tz_convert(LOCAL_TZ)
+        except Exception:
+            pass
+        df["fecha_hora"] = fh.dt.strftime("%Y-%m-%d %H:%M:%S")
 
     if df.empty:
         return df
@@ -219,8 +259,11 @@ with tab1:
     with col2:
         date_end = st.date_input("Hasta", value=today.date())
 
-    dt_start = f"{date_start} 00:00:00"
-    dt_end = f"{date_end} 23:59:59"
+    # Convertimos rango seleccionado (hora local) a UTC para que el filtro calce con lo guardado en BD
+    dt_start_local = datetime.combine(date_start, time.min).replace(tzinfo=LOCAL_TZ)
+    dt_end_local = datetime.combine(date_end, time.max).replace(tzinfo=LOCAL_TZ)
+    dt_start = dt_start_local.astimezone(UTC_TZ).strftime("%Y-%m-%d %H:%M:%S")
+    dt_end = dt_end_local.astimezone(UTC_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
     with col3:
         proj_opt = st.selectbox(

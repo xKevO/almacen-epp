@@ -1,7 +1,7 @@
 import re
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
-from datetime import datetime
 
 import pandas as pd
 from sqlalchemy import text
@@ -52,23 +52,27 @@ def parse_date_from_filename(name):
     if not m:
         return None
     dd, mm, yyyy = m.group(1), m.group(2), m.group(3)
-    return f"{yyyy}-{mm}-{dd}T08:00:00"
+    return f"{yyyy}-{mm}-{dd} 13:00:00"
 
 
 def read_kardex_total(path: Path) -> pd.DataFrame:
     raw = pd.read_excel(path, sheet_name="KARDEX TOTAL", header=None, dtype=str)
     header_row = detect_header_row(raw)
     if header_row is None:
-        raise RuntimeError(f"No pude detectar encabezado 'DESCRIPCION DE EPP' en {path.name}")
+        raise RuntimeError(
+            f"No pude detectar encabezado 'DESCRIPCION DE EPP' en {path.name}"
+        )
 
     # encabezado + datos
     header = raw.iloc[header_row].tolist()
-    data = raw.iloc[header_row + 1:].copy()
+    data = raw.iloc[header_row + 1 :].copy()
 
     # usamos solo las primeras 7 columnas (evita el pivot a la derecha)
     data = data.iloc[:, :7]
     header = header[:7]
-    data.columns = [str(c).strip() if c is not None else f"col_{i}" for i, c in enumerate(header)]
+    data.columns = [
+        str(c).strip() if c is not None else f"col_{i}" for i, c in enumerate(header)
+    ]
 
     # limpiar filas vacías
     data = data.dropna(how="all")
@@ -90,7 +94,9 @@ def read_kardex_total(path: Path) -> pd.DataFrame:
     c_stock = pick("STOCK")
 
     if not c_desc or not c_stock:
-        raise RuntimeError(f"No encontré columnas claves (DESCRIPCION/STOCK) en {path.name}. Columnas: {list(data.columns)}")
+        raise RuntimeError(
+            f"No encontré columnas claves (DESCRIPCION/STOCK) en {path.name}. Columnas: {list(data.columns)}"
+        )
 
     out = pd.DataFrame()
     out["description"] = data[c_desc].apply(clean_str)
@@ -101,38 +107,51 @@ def read_kardex_total(path: Path) -> pd.DataFrame:
     # filtrar filas válidas
     out = out[out["description"].notna()]
     out = out[out["stock_qty"].notna()]  # solo lo que tenga stock numérico
-    out = out[out["stock_qty"] >= 0]     # evitamos negativos raros
+    out = out[out["stock_qty"] >= 0]  # evitamos negativos raros
     return out
 
 
-def upsert_items_and_seed_stock(kardex_path: Path, project_code: str, location_code: str):
+def upsert_items_and_seed_stock(
+    kardex_path: Path, project_code: str, location_code: str
+):
     engine = get_engine()
 
     # leer
     df = read_kardex_total(kardex_path)
 
     # timestamp para el movimiento inicial
-    txn_datetime = parse_date_from_filename(kardex_path.name) or datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    txn_datetime = parse_date_from_filename(kardex_path.name) or datetime.now(
+        timezone.utc
+    ).strftime("%Y-%m-%d %H:%M:%S")
     reference = f"INIT_STOCK_{project_code}_{txn_datetime[:10]}"
 
     with engine.begin() as conn:
         conn.execute(text("PRAGMA foreign_keys = ON;"))
 
         # obtener project_id y location_id
-        project_id = conn.execute(text("SELECT project_id FROM projects WHERE code=:c"), {"c": project_code}).scalar_one()
-        location_id = conn.execute(text("SELECT location_id FROM locations WHERE code=:c"), {"c": location_code}).scalar_one()
+        project_id = conn.execute(
+            text("SELECT project_id FROM projects WHERE code=:c"), {"c": project_code}
+        ).scalar_one()
+        location_id = conn.execute(
+            text("SELECT location_id FROM locations WHERE code=:c"),
+            {"c": location_code},
+        ).scalar_one()
 
         # idempotencia: si ya sembraste este INIT, no lo duplica
         existing = conn.execute(
-            text("""
+            text(
+                """
             SELECT COUNT(*) FROM transactions
             WHERE txn_type='ADJUST' AND reference=:ref AND project_id=:pid AND location_id=:lid
-            """),
-            {"ref": reference, "pid": project_id, "lid": location_id}
+            """
+            ),
+            {"ref": reference, "pid": project_id, "lid": location_id},
         ).scalar_one()
 
         if existing and existing > 0:
-            print(f"⚠️ Ya existe seed de stock para {project_code} con reference={reference}. No duplico.")
+            print(
+                f"⚠️ Ya existe seed de stock para {project_code} con reference={reference}. No duplico."
+            )
             return
 
         items_upserted = 0
@@ -148,25 +167,30 @@ def upsert_items_and_seed_stock(kardex_path: Path, project_code: str, location_c
 
             # Upsert item por name (sku lo dejamos para después)
             conn.execute(
-                text("""
+                text(
+                    """
                 INSERT INTO items (sku, name, category, unit, has_size, useful_life_days, min_stock, is_active)
                 VALUES (NULL, :name, 'EPP', 'UND', :has_size, NULL, :min_stock, 1)
                 ON CONFLICT(name) DO UPDATE SET
                     has_size = CASE WHEN excluded.has_size=1 THEN 1 ELSE items.has_size END,
                     min_stock = CASE WHEN excluded.min_stock > items.min_stock THEN excluded.min_stock ELSE items.min_stock END,
                     is_active = 1
-                """),
-                {"name": desc, "has_size": has_size, "min_stock": min_stock}
+                """
+                ),
+                {"name": desc, "has_size": has_size, "min_stock": min_stock},
             )
             items_upserted += 1
 
-            item_id = conn.execute(text("SELECT item_id FROM items WHERE name=:n"), {"n": desc}).scalar_one()
+            item_id = conn.execute(
+                text("SELECT item_id FROM items WHERE name=:n"), {"n": desc}
+            ).scalar_one()
 
             # Sembrar stock como ADJUST (+)
             # Si talla viene, la guardamos en size, si no, NULL
             if stock > 0:
                 conn.execute(
-                    text("""
+                    text(
+                        """
                     INSERT INTO transactions (
                         txn_datetime, txn_type, project_id, location_id, item_id, qty, size,
                         employee_id, request_number, reference, notes, created_by
@@ -174,7 +198,8 @@ def upsert_items_and_seed_stock(kardex_path: Path, project_code: str, location_c
                         :dt, 'ADJUST', :pid, :lid, :iid, :qty, :size,
                         NULL, NULL, :ref, 'Seed inicial desde KARDEX TOTAL', 'system'
                     )
-                    """),
+                    """
+                    ),
                     {
                         "dt": txn_datetime,
                         "pid": project_id,
@@ -183,11 +208,13 @@ def upsert_items_and_seed_stock(kardex_path: Path, project_code: str, location_c
                         "qty": stock,
                         "size": talla,
                         "ref": reference,
-                    }
+                    },
                 )
                 txn_inserted += 1
 
-        print(f"✅ {project_code}: items procesados={len(df)} | transacciones ADJUST insertadas={txn_inserted} | reference={reference}")
+        print(
+            f"✅ {project_code}: items procesados={len(df)} | transacciones ADJUST insertadas={txn_inserted} | reference={reference}"
+        )
 
 
 def main():

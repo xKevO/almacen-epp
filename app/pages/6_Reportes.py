@@ -1,3 +1,6 @@
+from datetime import datetime, time, timezone
+from zoneinfo import ZoneInfo
+
 import pandas as pd
 import streamlit as st
 from db.connection import get_engine
@@ -7,6 +10,12 @@ st.set_page_config(page_title="Reportes KPI", layout="wide")
 st.title("📊 KPIs de Rotación / Consumo de EPP")
 
 engine = get_engine()
+
+# Estrategia definitiva de fechas/horas:
+# - Guardar en BD en UTC (txn_datetime en UTC)
+# - Mostrar y filtrar en hora local (America/Lima), convirtiendo a UTC al consultar
+LOCAL_TZ = ZoneInfo("America/Lima")
+UTC_TZ = timezone.utc
 
 
 # -------------------------
@@ -88,11 +97,27 @@ def query_consumo(filters: dict) -> pd.DataFrame:
     with engine.connect() as conn:
         df = pd.read_sql(text(q), conn, params=params)
 
+    # Mostrar fecha/hora en zona local (America/Lima).
+    # En BD se asume UTC; si viene naive, la tratamos como UTC.
+    if not df.empty and "fecha_hora" in df.columns:
+        fh = pd.to_datetime(df["fecha_hora"], errors="coerce")
+        try:
+            fh = fh.dt.tz_localize("UTC", nonexistent="shift_forward", ambiguous="NaT")
+        except Exception:
+            pass
+        try:
+            fh = fh.dt.tz_convert(LOCAL_TZ)
+        except Exception:
+            pass
+        df["fecha_hora"] = fh
+
     # Normalizamos fecha
     if not df.empty:
-        df["fecha_hora"] = pd.to_datetime(df["fecha_hora"], errors="coerce")
+        # Ya convertimos fecha_hora a hora local (tz-aware). Derivamos fecha/mes desde local.
         df["fecha"] = df["fecha_hora"].dt.date
         df["mes"] = df["fecha_hora"].dt.to_period("M").astype(str)
+        # Para tablas/export, mostramos sin sufijo de zona
+        df["fecha_hora"] = df["fecha_hora"].dt.strftime("%Y-%m-%d %H:%M:%S")
 
     return df
 
@@ -118,7 +143,7 @@ if items.empty:
 # -------------------------
 st.subheader("Filtros")
 
-today = pd.Timestamp.now().normalize()
+today = pd.Timestamp.now(tz=LOCAL_TZ).normalize()
 default_start = (today - pd.Timedelta(days=30)).date()
 
 c1, c2, c3, c4 = st.columns([1.2, 1.2, 1.6, 1.6])
@@ -128,8 +153,11 @@ with c1:
 with c2:
     date_end = st.date_input("Hasta", value=today.date())
 
-dt_start = f"{date_start} 00:00:00"
-dt_end = f"{date_end} 23:59:59"
+# Convertimos rango seleccionado (hora local) a UTC para que el filtro calce con lo guardado en BD
+dt_start_local = datetime.combine(date_start, time.min).replace(tzinfo=LOCAL_TZ)
+dt_end_local = datetime.combine(date_end, time.max).replace(tzinfo=LOCAL_TZ)
+dt_start = dt_start_local.astimezone(UTC_TZ).strftime("%Y-%m-%d %H:%M:%S")
+dt_end = dt_end_local.astimezone(UTC_TZ).strftime("%Y-%m-%d %H:%M:%S")
 
 with c3:
     proj_opt = st.selectbox(
