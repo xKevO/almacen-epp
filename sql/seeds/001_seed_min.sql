@@ -1,30 +1,47 @@
+-- 001_seed_min.sql
+-- Seed mínimo: proyectos y ubicaciones base
 PRAGMA foreign_keys = ON;
 
-INSERT INTO projects (code, name) VALUES
-('OBRAS', 'Obras Civiles'),
-('RELAV', 'Relavera')
-ON CONFLICT(code) DO NOTHING;
+-- =========================
+-- Proyectos
+-- =========================
+INSERT INTO projects (code, name, is_active)
+SELECT 'OBRAS', 'Obras civiles', 1
+WHERE NOT EXISTS (SELECT 1 FROM projects WHERE code = 'OBRAS');
 
-INSERT INTO warehouses (name) VALUES
-('ALMACEN PRINCIPAL')
-ON CONFLICT DO NOTHING;
+INSERT INTO projects (code, name, is_active)
+SELECT 'RELAV', 'Relavera', 1
+WHERE NOT EXISTS (SELECT 1 FROM projects WHERE code = 'RELAV');
 
--- Zonas por proyecto (mismo almacén físico, separado por áreas)
-INSERT INTO locations (warehouse_id, project_id, code, name, is_segregation)
-SELECT w.warehouse_id, p.project_id, 'Z-OBRAS', 'Zona Obras Civiles', 0
-FROM warehouses w, projects p
-WHERE w.name='ALMACEN PRINCIPAL' AND p.code='OBRAS'
-AND NOT EXISTS (SELECT 1 FROM locations WHERE code='Z-OBRAS');
+-- =========================
+-- Ubicaciones / Zonas
+-- =========================
+-- Zona de Obras Civiles
+INSERT INTO locations (project_id, code, name, is_segregation, is_active)
+SELECT
+  (SELECT project_id FROM projects WHERE code='OBRAS'),
+  'Z-OBRAS',
+  'Zona Obras civiles',
+  0,
+  1
+WHERE NOT EXISTS (SELECT 1 FROM locations WHERE code='Z-OBRAS');
 
-INSERT INTO locations (warehouse_id, project_id, code, name, is_segregation)
-SELECT w.warehouse_id, p.project_id, 'Z-RELAV', 'Zona Relavera', 0
-FROM warehouses w, projects p
-WHERE w.name='ALMACEN PRINCIPAL' AND p.code='RELAV'
-AND NOT EXISTS (SELECT 1 FROM locations WHERE code='Z-RELAV');
+-- Zona de Relavera
+INSERT INTO locations (project_id, code, name, is_segregation, is_active)
+SELECT
+  (SELECT project_id FROM projects WHERE code='RELAV'),
+  'Z-RELAV',
+  'Zona Relavera',
+  0,
+  1
+WHERE NOT EXISTS (SELECT 1 FROM locations WHERE code='Z-RELAV');
 
--- Segregación (zona general sin proyecto)
-INSERT INTO locations (warehouse_id, project_id, code, name, is_segregation)
-SELECT w.warehouse_id, NULL, 'SEGR', 'Segregación', 1
-FROM warehouses w
-WHERE w.name='ALMACEN PRINCIPAL'
-AND NOT EXISTS (SELECT 1 FROM locations WHERE code='SEGR');
+-- Zona de Segregación (común, sin proyecto)
+INSERT INTO locations (project_id, code, name, is_segregation, is_active)
+SELECT
+  NULL,
+  'SEGR',
+  'Segregación',
+  1,
+  1
+WHERE NOT EXISTS (SELECT 1 FROM locations WHERE code='SEGR');
